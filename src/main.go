@@ -3,134 +3,148 @@ package main
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 
-	"github.com/cavaliercoder/grab"
+	"github.com/cavaliergopher/grab/v3"
 )
 
-const pineappleSrc string = "https://github.com/pineappleEA/pineapple-src/"
-const pineappleSite string = "https://pineappleEA.github.io/"
+// custom const
+const (
+	GHEndpoint        = "https://github.com/pineappleEA/pineapple-src/"
+	PAReleaseEndpoint = "https://pineappleEA.github.io/"
 
-//TODO: set actually usable default install path
-const defaultPath string = "C:/yuzu"
+	DefaultPath = "C:/yuzu"
+)
 
 func main() {
-	logfile, err := os.Create("log.txt")
+	// Create log file or open for append
+	logfile, err := os.OpenFile("log.txt", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer logfile.Close()
+
+	// Set log output to the log file
 	log.SetOutput(logfile)
-	a := app.NewWithID("pinEApple updater")
+
+	// * create new app
+	a := app.NewWithID(strconv.Itoa(os.Getpid()))
+	// * create new window
 	w := a.NewWindow("PinEApple Updater")
+	// * set icon
 	w.SetIcon(resourceIconPng)
-	log.Println("Downloading available versions from pineappleea.github.io")
-	versionSlice, linkMap := downloadList()
-	w.SetContent(mainUI(versionSlice, linkMap))
+
+	log.Printf("Downloading available versions from %s", PAReleaseEndpoint)
+
+	// * download list of versions and links
+	versions := make([]int, 0)
+	links := make(map[int]string)
+	platform := runtime.GOOS  // windows or linux
+	if platform == "darwin" { // force windows
+		platform = "windows"
+		// log.Fatal("macOS is not supported")
+	}
+	if err := list(platform, &versions, links); err != nil {
+		log.Fatal(err)
+	}
+
+	// * create mainUI
+	w.SetContent(mainUI(versions, links))
 	w.Resize(fyne.NewSize(500, 450))
 	w.Show()
+
+	// * run app
 	a.Run()
 }
 
-func downloadList() ([]int, map[int]string) {
-	//return variables
-	linkMap := make(map[int]string)
-	versionSlice := make([]int, 0)
-
-	//download site into resp
-	resp, err := http.Get(pineappleSite)
+func list(platform string, versions *[]int, links map[int]string) error {
+	// Download site into resp
+	resp, err := http.Get(PAReleaseEndpoint)
 	if err != nil {
-		log.Fatal(os.Stderr, "Could not obtain list of versions!\n", err)
+		return fmt.Errorf("Could not download site: %v", err)
 	}
 	defer resp.Body.Close()
 
-	//read response body through scanner
+	// Read response body through scanner
 	scanner := bufio.NewScanner(resp.Body)
 	for i := 0; scanner.Scan(); i++ {
-		var line = scanner.Text()
-		match, _ := regexp.MatchString("EA [0-9]", line)
-		// extract version number
-		versionPattern, _ := regexp.Compile("EA [0-9]*")
-		versionString := versionPattern.FindString(scanner.Text())
-		numberPattern, _ := regexp.Compile("[0-9]*$")
-		versionString = numberPattern.FindString(versionString)
-		version, _ := strconv.Atoi(versionString)
-		if match {
-			// extract link
-			linkPattern, _ := regexp.Compile("https://anonfiles.com/.*/YuzuEA-[0-9]*_7z")
-			link := linkPattern.FindString(scanner.Text())
+		line := scanner.Text()
 
-			//save link in map
-			linkMap[version] = link
-			//add version number to slice
-			versionSlice = append(versionSlice, version)
+		// Check if the line contains "EA" followed by a space and a number
+		if match, _ := regexp.MatchString("EA [0-9]", line); match {
+			// Extract version number
+			versionPattern := regexp.MustCompile("EA [0-9]+")
+			versionString := versionPattern.FindString(line)
+			versionString = regexp.MustCompile("[0-9]+").FindString(versionString)
+			version, _ := strconv.Atoi(versionString)
 
+			// * Mapping link
+			switch platform {
+			case "windows":
+				links[version] = fmt.Sprintf("%sreleases/download/EA-%d/Windows-Yuzu-EA-%d.zip", GHEndpoint, version, version)
+			case "linux":
+				links[version] = fmt.Sprintf("%sreleases/download/EA-%d/Linux-Yuzu-EA-%d.AppImage", GHEndpoint, version, version)
+			}
+
+			*versions = append(*versions, version)
+
+			// sample
+			// https://github.com/pineappleEA/pineapple-src/releases/download/EA-4079/Linux-Yuzu-EA-4079.AppImage
+			// https://github.com/pineappleEA/pineapple-src/releases/download/EA-4079/Windows-Yuzu-EA-4079.zip
 		} else if line == "</html>" {
+			// Exit loop when the </html> tag is encountered
 			break
 		}
 	}
-	if len(versionSlice) <= 1 {
-		log.Fatal(os.Stderr, "Could not obtain list of files!\n")
+
+	if len(*versions) == 0 {
+		return fmt.Errorf("Could not obtain the list of files")
 	}
-	log.Println("Found " + strconv.Itoa(len(versionSlice)) + " versions")
-	return versionSlice, linkMap
+
+	return nil
 }
 
-func install(versionSlice []int, linkMap map[int]string, selectedVersion int) {
-	log.Println("Trying to install version " + strconv.Itoa(versionSlice[selectedVersion]))
-	resp, _ := http.Get(pineappleSrc + "releases/download/EA-" + strconv.Itoa(versionSlice[selectedVersion]) + "/Windows-Yuzu-EA-" + strconv.Itoa(versionSlice[selectedVersion]) + ".7z")
-	defer resp.Body.Close()
-	var downloadLink string
-	if resp.StatusCode == 200 {
-		// Downloading from Github
-		downloadLink = pineappleSrc + "releases/download/EA-" + strconv.Itoa(versionSlice[selectedVersion]) + "/Windows-Yuzu-EA-" + strconv.Itoa(versionSlice[selectedVersion]) + ".7z"
-	} else {
-		//Download from Anonfiles
-		//Download Anonfiles page to grab direct download
-		resp, err := http.Get(linkMap[versionSlice[selectedVersion]])
-		if err != nil {
-			log.Fatal(os.Stderr, "Neither GDrive nor Anonfiles responds! Exiting...\n", err)
-		}
-		//go line through line and search for direct download link with regex
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			linkPattern, _ := regexp.Compile("https://cdn-.*anonfiles.*7z")
-			if linkPattern.MatchString(scanner.Text()) {
-				downloadLink = linkPattern.FindString(scanner.Text())
-				break
-			}
-		}
-		//exit if no download link found
-		if downloadLink == "" {
-			log.Fatal(os.Stderr, "No download link found, Anonfiles or Github seems to be having issues! Exiting...\n")
-		}
-		defer resp.Body.Close()
+func download(link string) error {
+	// * ping download link
+	ping, err := http.Get(link)
+	if err != nil {
+		return fmt.Errorf("Failed to download from GitHub: %v", err)
 	}
-	downloadFile(downloadLink)
-}
+	defer ping.Body.Close()
 
-//Downloads file from given link to set path
-func downloadFile(link string) {
-	log.Println("Downloading from " + link)
+	if ping.StatusCode != http.StatusOK {
+		return fmt.Errorf("no download link found, Anonfiles or GitHub seems to be having issues")
+	}
+
 	//TODO: figure out proper way to set the path for windows
-	req, _ := grab.NewRequest(fyne.CurrentApp().Preferences().StringWithFallback("path", defaultPath), link)
+	dst := fyne.CurrentApp().Preferences().StringWithFallback("path", DefaultPath)
+	fmt.Println("Download to:", dst)
+	req, err := grab.NewRequest(dst, link)
+	if err != nil {
+		return fmt.Errorf("Failed to create download request: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	req = req.WithContext(ctx)
 	resp := grab.DefaultClient.Do(req)
+
 	//TODO: figure out why the mainUI is unresponsive when the downloadUI is open
 	go downloadUI(resp, cancel)
 
 	// check for errors
 	if err := resp.Err(); err != nil && err.Error() != "context canceled" {
-		log.Fatal(os.Stderr, "Download failed: %v\n", err)
+		return fmt.Errorf("Download failed: %v", err)
 	}
 
+	return nil
 }
